@@ -37,8 +37,8 @@ fn local_audio_publication_must_not_overwrite_an_existing_source_name() {
     let materializer = &materializer_tail[..materializer_end];
 
     assert!(
-        materializer.contains("std::fs::hard_link(&stage, &destination)"),
-        "publication must use an atomic no-clobber filesystem create instead of check-then-rename"
+        materializer.contains("commit_local_audio_publication(&stage, &destination, project_root)"),
+        "publication must use the platform-correct no-clobber durable commit boundary"
     );
     assert!(
         !materializer.contains("destination.exists()"),
@@ -46,7 +46,32 @@ fn local_audio_publication_must_not_overwrite_an_existing_source_name() {
     );
     assert!(
         !materializer.contains("std::fs::rename(&stage, &destination)"),
-        "overwrite-capable rename must not publish the immutable project source"
+        "overwrite-capable portable rename must not publish the immutable project source"
+    );
+}
+
+#[test]
+fn local_audio_publication_commits_namespace_before_identity_authority() {
+    let source = include_str!("../src/main.rs");
+    let materializer_start = source
+        .find("fn materialize_local_audio_source(")
+        .expect("desktop materializer must remain present");
+    let materializer_tail = &source[materializer_start..];
+    let materializer_end = materializer_tail
+        .find("\n}\n\nfn parse_request_payload")
+        .expect("materializer boundary must remain inspectable");
+    let materializer = &materializer_tail[..materializer_end];
+
+    let durable_commit = materializer
+        .find("commit_local_audio_publication(&stage, &destination, project_root)")
+        .expect("publication must durably commit the project-owned namespace");
+    let identity = materializer
+        .find("build_local_audio_publication_identity(project_id, &extension, &receipt)")
+        .expect("materializer must derive path-free publication identity");
+
+    assert!(
+        durable_commit < identity,
+        "bootstrap/persistence identity must not be minted before the publication namespace has crossed its platform durability barrier"
     );
 }
 
