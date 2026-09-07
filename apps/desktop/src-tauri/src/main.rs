@@ -224,7 +224,6 @@ fn materialize_local_audio_source(
 
     if commit_local_audio_publication(&stage, &destination, project_root).is_err() {
         let _ = std::fs::remove_file(&stage);
-        let _ = std::fs::remove_file(&destination);
         return Err("Could not prepare the local project workspace.".to_string());
     }
 
