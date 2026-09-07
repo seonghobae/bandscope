@@ -95,10 +95,10 @@ def test_chord_segment_builder_handles_zero_frames_without_final_segment() -> No
     assert result == []
 
 
-def test_cli_skips_temporal_probe_when_local_source_path_is_empty(
+def test_cli_forwards_empty_local_source_path_to_orchestration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Do not invoke the temporary temporal probe for an empty local source path."""
+    """Let the owning orchestration API validate an empty local source path."""
     payload = {
         "jobId": "job-empty-source",
         "request": {
@@ -111,17 +111,15 @@ def test_cli_skips_temporal_probe_when_local_source_path_is_empty(
     monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps(payload)))
     monkeypatch.setattr(cli.sys, "stdout", stdout)
 
-    with (
-        patch.object(cli, "TemporalAnalyzer") as temporal_analyzer,
-        patch.object(
-            cli,
-            "run_analysis_job",
-            return_value={"jobId": "job-empty-source", "state": "failed"},
-        ),
-    ):
+    with patch.object(
+        cli,
+        "run_analysis_job",
+        return_value={"jobId": "job-empty-source", "state": "failed"},
+    ) as run_analysis_job:
         assert cli.main() == 0
 
-    temporal_analyzer.assert_not_called()
+    assert run_analysis_job.call_args.args[0] == "job-empty-source"
+    assert run_analysis_job.call_args.args[1] == payload["request"]
     assert json.loads(stdout.getvalue())["jobId"] == "job-empty-source"
 
 

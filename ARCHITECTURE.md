@@ -93,6 +93,16 @@ Last updated: 2026-03-11
 - Automatic analysis should remain editable without losing provenance of what was model-generated versus user-confirmed.
 - Future shared contracts should preserve manual overrides, confidence markers, and export-safe summaries of those states.
 
+## CLI job-input boundary
+
+The analysis CLI owns only input-source selection, bounded byte acquisition,
+UTF-8/JSON decoding, and delegation to the analysis orchestration API. Local
+job-file authority is represented by explicit `job_path`, `job_file_path`,
+`path_authority`, `preflight_status`, `open_flags`, and `file_descriptor`
+identifiers. Temporal, harmony, range, separation, and persistence work belongs
+to the orchestration pipeline; the CLI does not publish analyzer hooks or run a
+second pre-validation analysis path.
+
 ## Harness decisions
 
 - The harness uses `npm` workspaces for JavaScript/TypeScript and `uv` for Python.
