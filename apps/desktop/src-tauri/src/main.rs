@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod local_audio_publication;
+
 use bandscope_desktop_core::*;
+use local_audio_publication::commit_local_audio_publication;
 use rfd::FileDialog;
 use serde_json::{json, Value};
 use std::{
@@ -13,6 +16,16 @@ use std::{
 };
 use tauri::{Emitter, Manager, Runtime};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+/// Native-only cache of verified local-audio publication identities.
+///
+/// Security Notes: entries are keyed only by BandScope-minted project ids and
+/// contain the bounded path-free publication evidence emitted by Resource
+/// Admission. User filesystem paths are never retained in this state.
+#[derive(Default)]
+struct LocalAudioPublicationIdentityState(
+    std::sync::Mutex<std::collections::HashMap<String, LocalAudioPublicationIdentity>>,
+);
 
 fn iso_timestamp_now() -> String {
     OffsetDateTime::now_utc()
@@ -141,7 +154,25 @@ fn app_owned_root<R: Runtime>(
     Ok(root)
 }
 
-fn normalize_local_audio_source(path: &Path) -> Result<LocalAudioSourcePayload, String> {
+/// Admit one OS-selected local audio file into a project-owned immutable source artifact.
+///
+/// Security Notes: the external path is used only to canonicalize and open the
+/// user-authorized source. Size is checked from that opened descriptor, bytes
+/// are copied through the bounded Resource Admission helper into a private
+/// same-project staging file. After the stage is synchronized, publication uses
+/// a platform-specific no-clobber durability boundary: Unix links the stage,
+/// removes the private name, and synchronizes the project directory; Windows
+/// performs a no-replace `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`. Only then
+/// is the published object re-opened and required to reproduce the staging
+/// size+SHA-256 receipt before path-free bootstrap/persistence identity is
+/// minted. This does not claim durability for creation or replacement of
+/// higher directory ancestors. Atomic no-follow descriptor acquisition remains
+/// a separate platform-hardening requirement.
+fn materialize_local_audio_source(
+    path: &Path,
+    project_root: &Path,
+    project_id: &str,
+) -> Result<(LocalAudioSourcePayload, LocalAudioPublicationIdentity), String> {
     let canonical = path
         .canonicalize()
         .map_err(|_| "Could not read the selected audio file.".to_string())?;
@@ -153,22 +184,104 @@ fn normalize_local_audio_source(path: &Path) -> Result<LocalAudioSourcePayload, 
     if !AUDIO_EXTENSIONS.contains(&extension.as_str()) {
         return Err("Choose a WAV, MP3, FLAC, or M4A file to start analysis.".into());
     }
-    let metadata = std::fs::metadata(&canonical)
-        .map_err(|_| "Could not read the selected audio file.".to_string())?;
-    if !metadata.is_file() || metadata.len() == 0 {
-        return Err("Could not read the selected audio file.".into());
-    }
     let file_name = canonical
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| "Could not read the selected audio file.".to_string())?;
+        .ok_or_else(|| "Could not read the selected audio file.".to_string())?
+        .to_string();
+    let source = std::fs::File::open(&canonical)
+        .map_err(|_| "Could not read the selected audio file.".to_string())?;
+    let metadata = source
+        .metadata()
+        .map_err(|_| "Could not read the selected audio file.".to_string())?;
+    if !metadata.is_file() {
+        return Err("Could not read the selected audio file.".into());
+    }
+    validate_local_audio_file_size(metadata.len())?;
 
-    Ok(LocalAudioSourcePayload {
-        source_path: canonical.to_string_lossy().into_owned(),
-        file_name: file_name.to_string(),
-        extension,
-        file_size_bytes: metadata.len(),
-    })
+    let destination = project_root.join(format!("source.{extension}"));
+    let stage = project_root.join(format!(".source-{}.stage", uuid::Uuid::new_v4()));
+    let mut staged = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&stage)
+        .map_err(|_| "Could not prepare the local project workspace.".to_string())?;
+
+    let receipt = match copy_bounded_local_audio_with_receipt(source, &mut staged) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            drop(staged);
+            let _ = std::fs::remove_file(&stage);
+            return Err(error);
+        }
+    };
+    if staged.sync_all().is_err() {
+        drop(staged);
+        let _ = std::fs::remove_file(&stage);
+        return Err("Could not prepare the local project workspace.".to_string());
+    }
+    drop(staged);
+
+    if commit_local_audio_publication(&stage, &destination, project_root).is_err() {
+        let _ = std::fs::remove_file(&stage);
+        return Err("Could not prepare the local project workspace.".to_string());
+    }
+
+    let published_path_metadata = match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+        _ => {
+            let _ = std::fs::remove_file(&destination);
+            return Err("Could not prepare the local project workspace.".to_string());
+        }
+    };
+    if published_path_metadata.len() != receipt.file_size_bytes {
+        let _ = std::fs::remove_file(&destination);
+        return Err("Could not prepare the local project workspace.".to_string());
+    }
+    let published = match std::fs::File::open(&destination) {
+        Ok(file) => file,
+        Err(_) => {
+            let _ = std::fs::remove_file(&destination);
+            return Err("Could not prepare the local project workspace.".to_string());
+        }
+    };
+    let published_descriptor_metadata = match published.metadata() {
+        Ok(metadata) if metadata.is_file() && metadata.len() == receipt.file_size_bytes => metadata,
+        _ => {
+            drop(published);
+            let _ = std::fs::remove_file(&destination);
+            return Err("Could not prepare the local project workspace.".to_string());
+        }
+    };
+    if published_descriptor_metadata.len() != published_path_metadata.len()
+        || verify_local_audio_publication_receipt(published, &receipt).is_err()
+    {
+        let _ = std::fs::remove_file(&destination);
+        return Err("Could not prepare the local project workspace.".to_string());
+    }
+    let published_path_metadata = match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+        _ => {
+            let _ = std::fs::remove_file(&destination);
+            return Err("Could not prepare the local project workspace.".to_string());
+        }
+    };
+    if published_path_metadata.len() != receipt.file_size_bytes {
+        let _ = std::fs::remove_file(&destination);
+        return Err("Could not prepare the local project workspace.".to_string());
+    }
+
+    let publication_identity =
+        build_local_audio_publication_identity(project_id, &extension, &receipt)?;
+    Ok((
+        LocalAudioSourcePayload {
+            source_path: destination.to_string_lossy().into_owned(),
+            file_name,
+            extension,
+            file_size_bytes: receipt.file_size_bytes,
+        },
+        publication_identity,
+    ))
 }
 
 fn parse_request_payload(payload: Value) -> Result<AnalysisJobRequest, String> {
@@ -302,6 +415,20 @@ fn store_bootstrap_source(state: &AppState, summary: ProjectBootstrapSummaryPayl
     if let Ok(mut sources) = state.0.bootstrap_sources.lock() {
         sources.insert(summary.project_id.clone(), summary);
     }
+}
+
+/// Retain path-free publication evidence before the renderer receives bootstrap authority.
+fn store_local_audio_publication_identity(
+    state: &LocalAudioPublicationIdentityState,
+    identity: LocalAudioPublicationIdentity,
+) -> Result<(), String> {
+    let project_id = identity.project_id.clone();
+    let mut identities = state
+        .0
+        .lock()
+        .map_err(|_| "Could not prepare the local project workspace.".to_string())?;
+    identities.insert(project_id, identity);
+    Ok(())
 }
 
 fn lookup_bootstrap_source(
@@ -637,16 +764,19 @@ fn get_analysis_job_status(job_id: String, state: tauri::State<'_, AppState>) ->
 fn select_local_audio_source(
     app: tauri::AppHandle<impl Runtime>,
     state: tauri::State<'_, AppState>,
+    publication_state: tauri::State<'_, LocalAudioPublicationIdentityState>,
 ) -> Result<ProjectBootstrapSummaryPayload, String> {
     let path = FileDialog::new()
         .add_filter("Audio", &AUDIO_EXTENSIONS)
         .pick_file()
         .ok_or_else(|| "Choose a WAV, MP3, FLAC, or M4A file to start analysis.".to_string())?;
-    let source = normalize_local_audio_source(&path)?;
     let project_id = next_project_id(&state);
     let project_root = app_owned_root(&app, "projects", &project_id)?;
     let cache_root = app_owned_root(&app, "cache", &project_id)?;
     let temp_root = app_owned_root(&app, "temp", &project_id)?;
+    let (source, publication_identity) =
+        materialize_local_audio_source(&path, &project_root, &project_id)?;
+    store_local_audio_publication_identity(&publication_state, publication_identity)?;
 
     let summary = ProjectBootstrapSummaryPayload {
         project_id,
@@ -712,6 +842,7 @@ async fn import_youtube_url(
     if parsed.get("ok").and_then(|v| v.as_bool()) == Some(true) {
         if let Some(metadata) = parsed.get("metadata") {
             let source = youtube_source_from_metadata(metadata, &cache_root)?;
+            validate_local_audio_file_size(source.file_size_bytes)?;
 
             let summary = ProjectBootstrapSummaryPayload {
                 project_id,
@@ -826,7 +957,9 @@ fn attach_score_pdf(
 /// Security Notes: no path crosses the IPC boundary. Both ids are validated
 /// against strict allowlist shapes, the path is rebuilt locally, and the
 /// canonicalize-plus-prefix guard in `resolve_existing_score_pdf` rejects any
-/// escape from the app-owned scores root.
+/// escape from the app-owned scores root. The resolved file is then read
+/// through the bounded core helper so growth after attachment cannot trigger
+/// an allocation beyond the 25 MiB product limit.
 #[tauri::command]
 fn read_score_pdf(
     project_id: String,
@@ -838,7 +971,7 @@ fn read_score_pdf(
     }
     let scores_root = scores_root_for_project(&app, &project_id)?;
     let path = resolve_existing_score_pdf(&scores_root, &score_id)?;
-    std::fs::read(path).map_err(|_| "Could not read the score PDF.".to_string())
+    read_validated_score_pdf(&path)
 }
 
 /// Security Notes: same id validation and traversal guard as `read_score_pdf`;
@@ -868,6 +1001,7 @@ fn remove_score_pdf(
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .manage(LocalAudioPublicationIdentityState::default())
         .invoke_handler(tauri::generate_handler![
             select_local_audio_source,
             import_youtube_url,

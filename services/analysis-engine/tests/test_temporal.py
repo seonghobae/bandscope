@@ -46,9 +46,9 @@ def test_temporal_analyzer_basic(dummy_audio_file: Path) -> None:
 
 
 def test_temporal_analyzer_file_not_found() -> None:
-    """Test that analyzer raises appropriate error for missing files."""
+    """Test that analyzer raises a payload-safe error for missing files."""
     analyzer = TemporalAnalyzer()
-    with pytest.raises(FileNotFoundError, match="Audio file not found"):
+    with pytest.raises(FileNotFoundError, match="Audio source is unavailable"):
         analyzer.analyze("nonexistent_file.wav")
 
 
@@ -62,7 +62,7 @@ def test_temporal_analyzer_missing_file_does_not_call_decoder(
     monkeypatch.setattr(librosa, "load", load_mock)
 
     analyzer = TemporalAnalyzer()
-    with pytest.raises(FileNotFoundError, match="Audio file not found"):
+    with pytest.raises(FileNotFoundError, match="Audio source is unavailable"):
         analyzer.analyze("nonexistent_file.wav")
     load_mock.assert_not_called()
 
@@ -77,7 +77,7 @@ def test_temporal_analyzer_directory_does_not_call_decoder(
     load_mock = Mock(side_effect=AssertionError("librosa.load should not be called"))
     monkeypatch.setattr(librosa, "load", load_mock)
 
-    with pytest.raises(FileNotFoundError, match="Audio file not found"):
+    with pytest.raises(FileNotFoundError, match="Audio source is unavailable"):
         TemporalAnalyzer().analyze(tmp_path)
     load_mock.assert_not_called()
 
@@ -94,7 +94,7 @@ def test_temporal_analyzer_invalid_y_type(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setattr(librosa, "load", fake_load)
 
     test_wav = tmp_path / "test.wav"
-    test_wav.write_bytes(b"dummy")
+    sf.write(test_wav, np.zeros(4_000, dtype=np.float32), 44_100)
 
     with pytest.raises(ValueError, match="Expected numpy array"):
         TemporalAnalyzer().analyze(test_wav)
@@ -104,7 +104,7 @@ def test_temporal_analyzer_exception_handling(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Ensure temporal analyzer catches general exceptions and raises ValueError."""
+    """Ensure arbitrary decoder exception payloads are not relayed to callers."""
     import librosa
 
     from bandscope_analysis.temporal.analyzer import TemporalAnalyzer
@@ -115,10 +115,11 @@ def test_temporal_analyzer_exception_handling(
     monkeypatch.setattr(librosa, "load", fake_load)
 
     test_wav = tmp_path / "test.wav"
-    test_wav.write_bytes(b"dummy")
+    sf.write(test_wav, np.zeros(4_000, dtype=np.float32), 44_100)
 
-    with pytest.raises(ValueError, match="Temporal analysis failed: Mocked general error"):
+    with pytest.raises(ValueError, match=r"^Temporal analysis failed\.$") as exc_info:
         TemporalAnalyzer().analyze(test_wav)
+    assert "Mocked general error" not in str(exc_info.value)
 
 
 def test_temporal_analyzer_rejects_oversized_file(monkeypatch, tmp_path: Path) -> None:
@@ -128,7 +129,7 @@ def test_temporal_analyzer_rejects_oversized_file(monkeypatch, tmp_path: Path) -
     from bandscope_analysis.temporal import analyzer as analyzer_module
 
     test_wav = tmp_path / "large.wav"
-    test_wav.write_bytes(b"1234")
+    sf.write(test_wav, np.zeros(4_000, dtype=np.float32), 44_100)
 
     monkeypatch.setattr(analyzer_module, "MAX_AUDIO_FILE_BYTES", 1)
 
@@ -147,7 +148,7 @@ def test_temporal_analyzer_uses_duration_limit(monkeypatch, tmp_path: Path) -> N
     import librosa
 
     test_wav = tmp_path / "bounded.wav"
-    test_wav.write_bytes(b"1234")
+    sf.write(test_wav, np.zeros(4_000, dtype=np.float32), 44_100)
     captured_kwargs: dict[str, object] = {}
 
     def fake_load(path, **kwargs):
@@ -178,7 +179,7 @@ def test_temporal_analyzer_does_not_suppress_unrelated_loader_warnings(
     import librosa
 
     test_wav = tmp_path / "test.wav"
-    test_wav.write_bytes(b"dummy")
+    sf.write(test_wav, np.zeros(4_000, dtype=np.float32), 44_100)
 
     def fake_load(*args: object, **kwargs: object) -> tuple[np.ndarray, int]:
         warnings.warn("unrelated downstream warning", FutureWarning, stacklevel=2)

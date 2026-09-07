@@ -37,6 +37,7 @@ GitHub is the source of truth for repository governance, PR review, CI/CD, Code 
 - treat files, URLs, models, caches, and release artifacts as untrusted inputs
 - route orchestration through typed Tauri IPC and a narrow Python subprocess bridge before considering any loopback HTTP surface
 - bootstrap local audio projects by validating the selected file in Rust, then passing only typed source metadata through the orchestration boundary
+- before Python decoders transform source audio, preflight the already-open container handle through the shared `audio_resource_policy` source-rate/channel/duration contract, then rewind it for decoding
 - keep project and temp/cache bootstrap roots under Tauri-resolved app-owned directories rather than the shared OS temp namespace
 
 ## CI/CD and release flow

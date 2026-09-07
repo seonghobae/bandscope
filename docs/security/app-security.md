@@ -137,8 +137,11 @@ Every boundary crossing requires validation, scope restriction, minimal logging,
 - Cross-check extension, MIME, and actual decode behavior.
 - Prefer isolated worker processing for decode and analysis.
 - Guard against very large files, abnormal duration, and hostile metadata.
+- Apply the versioned canonical local-audio resource policy consistently at request preflight and again at the opened-file/decoded-waveform boundary; request metadata is never authoritative for actual resource use.
+- Before any decoder resamples, downmixes, or duration-truncates local audio, inspect source-container metadata from the already-open handle with `soundfile.info`, enforce the shared 8 kHz–192 kHz and mono/stereo source contract, reject overlong sources, and rewind the handle before `librosa.load`.
+- In the Python analysis boundary, reject decoded audio that is empty, non-finite, wrong-rate, wrong-shaped, or over the accepted sample budget before beat tracking or model inference. Use the one-sample-over decode probe described in `docs/doctoring/audio-resource-policy.md` so an exact-boundary track remains accepted while excess decoded output is observable and fails closed.
 - Do not add arbitrary filesystem scanning just to find media files.
-- When bootstrapping a project around local audio, prefer referencing the validated original file plus app-owned temp/cache/project roots over copying the file until persistence requirements justify the extra storage boundary.
+- When bootstrapping a project around local audio, use the OS-selected external file only as untrusted admission input. Stage and sync admitted bytes under the app-owned project root, publish them as `source.<extension>`, then reopen and verify the published regular/non-symlink object against the bounded size and SHA-256 receipt before analysis or persistence. Do not persist an arbitrary external absolute path as authority.
 
 ### YouTube and remote URL import
 
@@ -147,6 +150,8 @@ Every boundary crossing requires validation, scope restriction, minimal logging,
 - Validate scheme, host, path, and query before any fetch or handoff.
 - Do not widen URL intake into a generic remote downloader.
 - Sanitize remote metadata before display.
+- Apply the same canonical 100 MiB encoded-byte ceiling during YouTube download as local-file intake. Abort with yt-dlp `max_filesize` and a progress hook, then delete owned `.part` / `.ytdl` / `-Frag*` siblings that stay inside that import directory. Do not keep a divergent post-download-only 50 MB limit that lets a large transfer fill the cache root first.
+- Revalidate the filesystem-observed downloaded length before storing bootstrap state. Treat announced `filesize` / `filesize_approx` as a pre-download hint only.
 
 ### Subprocesses and native tools
 

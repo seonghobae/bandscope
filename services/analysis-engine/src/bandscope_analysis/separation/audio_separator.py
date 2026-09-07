@@ -9,9 +9,16 @@ consume.
 Security Notes:
 - Treats the selected audio file as untrusted input: the path is normalized and
   verified to be a file, and a maximum byte size is enforced before decode.
-- Inference runs locally on CPU with no network access. The model weights are
-  loaded from the local Demucs cache or a configured bundled path; offline
-  weight bundling is tracked in the supplemental component inventory.
+- Decoded audio is revalidated against the same versioned resource policy before
+  Demucs/model work so overlong, malformed, or non-finite decoder output fails
+  closed instead of being silently truncated or normalized.
+- Empty, non-finite, or float32-overflowed model stems fail closed before they
+  can become successful silence or downstream rehearsal evidence.
+- Inference runs locally with no network access. Accelerator outputs cross back
+  to CPU before NumPy conversion so configured device execution cannot fail at
+  the device/host boundary. The model weights are loaded from the local Demucs
+  cache or a configured bundled path; offline weight bundling is tracked in the
+  supplemental component inventory.
 - Does not log or persist raw audio, separated stems, or full source paths.
 - Fails with bounded, filename-scoped errors so callers can surface a safe
   failure without leaking local directory structure.
@@ -23,20 +30,18 @@ import contextlib
 import logging
 import os
 import sys
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-import librosa
 import numpy as np
 
-from bandscope_analysis.temporal.analyzer import (
-    KNOWN_LIBROSA_NUMBA_WARNING_FILTERS,
-    MAX_ANALYSIS_DURATION_SECONDS,
-    MAX_AUDIO_FILE_BYTES,
-    TARGET_SR,
+from bandscope_analysis.audio_decode import decode_mono_audio
+from bandscope_analysis.audio_resource_policy import (
+    DEFAULT_MAX_DURATION_SECONDS,
+    AudioResourcePolicy,
 )
+from bandscope_analysis.temporal.analyzer import MAX_AUDIO_FILE_BYTES, TARGET_SR
 
 from .model import AudioSeparationResult, AudioStemArray, AudioStemName, AudioStemPayload
 
@@ -45,6 +50,7 @@ logger = logging.getLogger(__name__)
 # Demucs htdemucs emits these four sources; this is the canonical stem set.
 _STEM_ORDER: tuple[AudioStemName, ...] = ("vocals", "bass", "drums", "other")
 _EMPTY_RANGE_EPS = 1e-9
+_MODEL_OUTPUT_ERROR = "Stem separation produced invalid audio."
 
 
 def _contains_parent_path_segment(path: Path) -> bool:
@@ -63,7 +69,7 @@ class AudioSeparationConfig:
 
     target_sample_rate: int = TARGET_SR
     max_file_bytes: int = MAX_AUDIO_FILE_BYTES
-    max_duration_seconds: float = float(MAX_ANALYSIS_DURATION_SECONDS)
+    max_duration_seconds: float = float(DEFAULT_MAX_DURATION_SECONDS)
     model_name: str = "htdemucs"
     device: str = "cpu"
     # Demucs splits long audio into overlapping segments internally, bounding
@@ -75,8 +81,13 @@ class AudioStemSeparator:
     """Split a selected local mix into canonical stems for downstream analysis."""
 
     def __init__(self, config: AudioSeparationConfig | None = None) -> None:
-        """Initialize the local stem separator (model is loaded lazily)."""
+        """Initialize the local stem separator and its canonical resource policy."""
         self.config = config or AudioSeparationConfig()
+        self.resource_policy = AudioResourcePolicy(
+            max_encoded_file_bytes=self.config.max_file_bytes,
+            target_sample_rate=self.config.target_sample_rate,
+            max_duration_seconds=self.config.max_duration_seconds,
+        )
         self._model: Any = None
 
     def separate(self, audio_path: str | Path) -> AudioSeparationResult:
@@ -119,8 +130,8 @@ class AudioStemSeparator:
         """Run the Demucs model on mono audio and return canonical mono stems.
 
         This is the single boundary to the neural model; it converts the mono
-        signal to the stereo tensor Demucs expects, applies the model on CPU, and
-        downmixes each source back to a mono float array.
+        signal to the stereo tensor Demucs expects, applies the model on the
+        configured device, and downmixes each source back to a mono host array.
         """
         model = self._load_model()
         sources = self._apply_model(model, audio)
@@ -172,7 +183,13 @@ class AudioStemSeparator:
                 progress=False,
             )[0]
         out = out * ref_std + ref_mean
-        return {name: out[i].mean(0).numpy() for i, name in enumerate(model.sources)}
+        stems: dict[str, np.ndarray[Any, Any]] = {}
+        for index, name in enumerate(model.sources):
+            stem = out[index].mean(0)
+            if self.config.device != "cpu":
+                stem = stem.cpu()
+            stems[name] = stem.numpy()
+        return stems
 
     def _resolve_audio_file(self, audio_path: str | Path) -> Path:
         """Normalize and validate the selected source path."""
@@ -190,39 +207,24 @@ class AudioStemSeparator:
         return path
 
     def _load_audio(self, path: Path) -> tuple[AudioStemArray, int]:
-        """Load bounded mono audio without logging or exposing the full source path."""
+        """Load bounded mono audio through the canonical decoder authority."""
         try:
             with path.open("rb") as fileobj:
                 file_size = os.fstat(fileobj.fileno()).st_size
-                if file_size > self.config.max_file_bytes:
-                    raise ValueError(
-                        "Audio file is too large for stem separation: "
-                        f"{file_size} bytes (max {self.config.max_file_bytes} bytes)"
-                    )
-
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore", category=DeprecationWarning, module=r"^audioread"
-                    )
-                    warnings.filterwarnings("ignore", category=FutureWarning, module=r"^audioread")
-                    for category, message, module in KNOWN_LIBROSA_NUMBA_WARNING_FILTERS:
-                        warnings.filterwarnings(
-                            "ignore",
-                            category=category,
-                            message=message,
-                            module=module,
-                        )
-                    y, sr = librosa.load(
-                        fileobj,
-                        sr=self.config.target_sample_rate,
-                        mono=True,
-                        duration=self.config.max_duration_seconds,
-                    )
+                if file_size <= 0:
+                    raise ValueError(f"Stem separation decode failed for {path.name}")
+                try:
+                    self.resource_policy.validate_encoded_file_bytes(file_size)
+                except ValueError as error:
+                    raise ValueError("Audio file is too large for stem separation") from error
+                y, sr = decode_mono_audio(fileobj, policy=self.resource_policy)
         except ValueError:
             raise
         except Exception as error:
             raise ValueError(f"Stem separation decode failed for {path.name}") from error
 
+        if y.size == 0:
+            raise ValueError(f"Stem separation decode failed for {path.name}")
         return _as_float_array(y), int(sr)
 
     def _fit_length(self, audio: AudioStemArray, target_length: int) -> AudioStemArray:
@@ -235,7 +237,12 @@ class AudioStemSeparator:
 
 
 def _as_float_array(values: object) -> AudioStemArray:
-    """Convert decoder and model output to a finite one-dimensional float array."""
-    array = np.ravel(np.asarray(values, dtype=np.float32))
-    finite = np.nan_to_num(array, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-    return cast(AudioStemArray, finite)
+    """Convert one finite, non-empty decoder/model output into mono float32 audio."""
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            array = np.ravel(np.asarray(values, dtype=np.float32))
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ValueError(_MODEL_OUTPUT_ERROR) from error
+    if array.size == 0 or not np.isfinite(array).all():
+        raise ValueError(_MODEL_OUTPUT_ERROR)
+    return cast(AudioStemArray, array)

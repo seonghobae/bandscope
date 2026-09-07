@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import warnings
 from pathlib import Path
 from typing import Any
 
@@ -12,18 +11,36 @@ import librosa
 import numpy as np
 from numpy.typing import NDArray
 
+from bandscope_analysis.audio_decode import decode_mono_audio
+from bandscope_analysis.audio_resource_policy import (
+    DEFAULT_AUDIO_RESOURCE_POLICY,
+    DEFAULT_MAX_DURATION_SECONDS,
+    AudioResourcePolicy,
+)
+
 from .model import TemporalFeatures
 
 logger = logging.getLogger(__name__)
 
-# Standard sample rate for BandScope analysis
-TARGET_SR = 44100
-MAX_AUDIO_FILE_BYTES = 100 * 1024 * 1024  # 100 MiB
-MAX_ANALYSIS_DURATION_SECONDS = 15 * 60  # 15 minutes
+# Compatibility aliases retained for callers/tests while the canonical values
+# are owned by AudioResourcePolicy. The decode-duration alias intentionally
+# includes one rejection-probe sample so an overlong source is detected rather
+# than silently truncated at the accepted rehearsal duration.
+TARGET_SR = DEFAULT_AUDIO_RESOURCE_POLICY.target_sample_rate
+MAX_AUDIO_FILE_BYTES = DEFAULT_AUDIO_RESOURCE_POLICY.max_encoded_file_bytes
+MAX_ANALYSIS_DURATION_SECONDS = DEFAULT_AUDIO_RESOURCE_POLICY.decode_probe_duration_seconds
 KNOWN_LIBROSA_NUMBA_WARNING_FILTERS = (
     (DeprecationWarning, r".*pkg_resources is deprecated.*", r".*librosa.*"),
     (FutureWarning, r".*Numba.*", r".*numba.*"),
 )
+_SAFE_TEMPORAL_FAILURE_MESSAGES = frozenset(
+    {
+        "Audio file is too large for temporal analysis",
+        "Audio input violates the audio resource policy.",
+    }
+)
+_MISSING_AUDIO_MESSAGE = "Audio source is unavailable for temporal analysis."
+_GENERIC_TEMPORAL_FAILURE_MESSAGE = "Temporal analysis failed."
 # ponytail: assumes 4/4; upgrade to meter estimation or a madmom DBN if other meters matter.
 BEATS_PER_BAR = 4
 
@@ -56,11 +73,34 @@ def _estimate_downbeats(
     return [float(bt) for i, bt in enumerate(beat_times) if (i - best_phase) % beats_per_bar == 0]
 
 
+def _safe_temporal_failure_message(error: Exception) -> str:
+    """Return an allowlisted diagnostic without relaying decoder payload text."""
+    message = str(error)
+    if message in _SAFE_TEMPORAL_FAILURE_MESSAGES:
+        return message
+    return _GENERIC_TEMPORAL_FAILURE_MESSAGE
+
+
 class TemporalAnalyzer:
-    """Analyzes temporal features (BPM, beats) from audio files."""
+    """Analyze bounded temporal features (BPM and beat grids) from local audio."""
+
+    def __init__(self, resource_policy: AudioResourcePolicy | None = None) -> None:
+        """Create an analyzer bound to one canonical local-audio resource policy.
+
+        Args:
+            resource_policy: Explicit policy for tests or specialized callers.
+                The default preserves the public module-level byte ceiling while
+                taking sample-rate and accepted rehearsal duration from the
+                canonical policy layer.
+        """
+        self.resource_policy = resource_policy or AudioResourcePolicy(
+            max_encoded_file_bytes=MAX_AUDIO_FILE_BYTES,
+            target_sample_rate=TARGET_SR,
+            max_duration_seconds=DEFAULT_MAX_DURATION_SECONDS,
+        )
 
     def analyze(self, audio_path: str | Path) -> TemporalFeatures:
-        """Decode audio and extract temporal features.
+        """Decode bounded audio and extract temporal features.
 
         Args:
             audio_path: Path to the audio file.
@@ -71,54 +111,23 @@ class TemporalAnalyzer:
         path = Path(audio_path)
         path_str = str(path)
         if not path.exists() or not path.is_file():
-            raise FileNotFoundError(f"Audio file not found: {path_str}")
+            raise FileNotFoundError(_MISSING_AUDIO_MESSAGE)
 
-        logger.info(f"Loading and decoding audio: {path_str}")
+        logger.info("Loading and decoding bounded local audio.")
 
         try:
             with path.open("rb") as fileobj:
                 file_size = os.fstat(fileobj.fileno()).st_size
-                if file_size > MAX_AUDIO_FILE_BYTES:
-                    raise ValueError(
-                        f"Audio file is too large for temporal analysis: {file_size} bytes "
-                        f"(max {MAX_AUDIO_FILE_BYTES} bytes)"
-                    )
+                try:
+                    self.resource_policy.validate_encoded_file_bytes(file_size)
+                except ValueError as error:
+                    raise ValueError("Audio file is too large for temporal analysis") from error
+                y_array, sr = decode_mono_audio(fileobj, policy=self.resource_policy)
 
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore", category=DeprecationWarning, module=r"^audioread"
-                    )
-                    warnings.filterwarnings("ignore", category=FutureWarning, module=r"^audioread")
-
-                    # Keep the loader's known third-party churn quiet without hiding
-                    # unrelated decoder warnings that tests and callers should see.
-                    for category, message, module in KNOWN_LIBROSA_NUMBA_WARNING_FILTERS:
-                        warnings.filterwarnings(
-                            "ignore",
-                            category=category,
-                            message=message,
-                            module=module,
-                        )
-                    # Load audio, converting to mono and standardizing sample rate
-                    y, sr = librosa.load(
-                        fileobj,
-                        sr=TARGET_SR,
-                        mono=True,
-                        duration=MAX_ANALYSIS_DURATION_SECONDS,
-                    )
-
-            # Ensure it's a 1D float array for librosa
-            if not isinstance(y, np.ndarray):
-                raise ValueError("Expected numpy array from librosa.load")
-
-            y_array: NDArray[np.floating[Any]] = y
             duration = float(librosa.get_duration(y=y_array, sr=sr))
 
             logger.info("Extracting tempo and beat tracking...")
-            # Use librosa's robust beat tracker
             tempo, beat_frames = librosa.beat.beat_track(y=y_array, sr=sr)
-
-            # Convert frame indices to time (seconds)
             beat_times: NDArray[np.floating[Any]] = librosa.frames_to_time(beat_frames, sr=sr)
 
             # Place downbeats on the strongest-onset bar phase (looks at the audio,
@@ -139,6 +148,6 @@ class TemporalAnalyzer:
                 "audio_path": path_str,
             }
 
-        except Exception as e:
-            logger.error(f"Failed to analyze audio {path_str}: {e}")
-            raise ValueError(f"Temporal analysis failed: {e}") from e
+        except Exception as error:
+            logger.error("Temporal analysis failed (%s).", type(error).__name__)
+            raise ValueError(_safe_temporal_failure_message(error)) from error

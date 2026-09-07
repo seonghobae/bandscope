@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import io
-import warnings
 from dataclasses import dataclass
 
 import librosa
 import numpy as np
 from numpy.typing import NDArray
+
+from bandscope_analysis.audio_decode import decode_mono_audio
+from bandscope_analysis.audio_resource_policy import AudioResourcePolicy
 
 TARGET_SR = 22050
 MAX_STEM_BYTES = 50 * 1024 * 1024
@@ -17,6 +19,12 @@ FRAME_LENGTH = 2048
 HOP_LENGTH = 512
 MIN_NOTE_DURATION_SECONDS = 0.05
 MIN_SIGNAL_PEAK = 1e-5
+TRANSCRIPTION_RESOURCE_POLICY = AudioResourcePolicy(
+    max_encoded_file_bytes=MAX_STEM_BYTES,
+    target_sample_rate=TARGET_SR,
+    max_duration_seconds=MAX_TRANSCRIPTION_DURATION_SECONDS,
+    max_decoded_audio_bytes=(TARGET_SR * MAX_TRANSCRIPTION_DURATION_SECONDS + 1) * 8,
+)
 
 
 @dataclass
@@ -42,16 +50,8 @@ def transcribe_bass_stem(stem_data: bytes) -> list[NoteEvent]:
     if len(stem_data) > MAX_STEM_BYTES:
         raise ValueError("Stem data is too large for transcription.")
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"^audioread")
-        y, sr = librosa.load(
-            io.BytesIO(stem_data),
-            sr=TARGET_SR,
-            mono=True,
-            duration=MAX_TRANSCRIPTION_DURATION_SECONDS,
-        )
-
-    y_array = np.asarray(y, dtype=np.float32)
+    source = io.BytesIO(stem_data)
+    y_array, sr = decode_mono_audio(source, policy=TRANSCRIPTION_RESOURCE_POLICY)
     if y_array.size == 0 or float(np.max(np.abs(y_array))) < MIN_SIGNAL_PEAK:
         return []
 

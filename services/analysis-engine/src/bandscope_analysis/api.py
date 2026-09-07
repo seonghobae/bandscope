@@ -14,6 +14,7 @@ from typing import Any, Literal, NotRequired, TypedDict, cast
 
 import numpy as np
 
+from bandscope_analysis.audio_resource_policy import DEFAULT_AUDIO_RESOURCE_POLICY
 from bandscope_analysis.health import HealthReport, build_health_report
 from bandscope_analysis.roles import RoleExtractor
 from bandscope_analysis.sections import extract_sections
@@ -306,8 +307,12 @@ def validate_analysis_job_request(payload: object) -> AnalysisJobRequest:
         raise ValueError("Invalid analysis job request: invalid field 'localSource.fileName'")
     if extension not in {"wav", "mp3", "flac", "m4a"}:
         raise ValueError("Invalid analysis job request: invalid field 'localSource.extension'")
-    if not isinstance(file_size_bytes, int) or file_size_bytes <= 0:
-        raise ValueError("Invalid analysis job request: invalid field 'localSource.fileSizeBytes'")
+    try:
+        file_size_bytes = DEFAULT_AUDIO_RESOURCE_POLICY.validate_encoded_file_bytes(file_size_bytes)
+    except ValueError as error:
+        raise ValueError(
+            "Invalid analysis job request: invalid field 'localSource.fileSizeBytes'"
+        ) from error
 
     normalized: AnalysisJobRequest = {
         "sourceKind": source_kind,

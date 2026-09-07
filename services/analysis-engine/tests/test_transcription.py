@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from bandscope_analysis.transcription import api as transcription_api
@@ -60,6 +63,32 @@ def test_transcribe_bass_stem_rejects_oversized_input(monkeypatch) -> None:
 
     with np.testing.assert_raises(ValueError):
         transcribe_bass_stem(b"abc")
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        SimpleNamespace(frames=22050 * 121, samplerate=22050, channels=2),
+        SimpleNamespace(frames=22050, samplerate=7_999, channels=2),
+        SimpleNamespace(frames=22050, samplerate=22050, channels=3),
+    ],
+)
+def test_transcribe_bass_stem_rejects_source_metadata_before_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    metadata: SimpleNamespace,
+) -> None:
+    """Bass transcription must validate source duration, rate, and channels before librosa."""
+    monkeypatch.setattr(
+        "bandscope_analysis.audio_metadata.soundfile.info",
+        lambda _fileobj: metadata,
+    )
+    load_mock = Mock(side_effect=AssertionError("source metadata must be checked first"))
+    monkeypatch.setattr(transcription_api.librosa, "load", load_mock)
+
+    with pytest.raises(ValueError, match="audio resource policy"):
+        transcribe_bass_stem(b"not-a-real-wav")
+
+    load_mock.assert_not_called()
 
 
 def test_transcribe_bass_stem_wraps_pitch_tracking_parameter_errors(monkeypatch) -> None:

@@ -396,7 +396,7 @@ class ChordRecognizer:
         Returns:
             List of TrackedChord dicts with start_time, end_time, chord, and confidence.
         """
-        if len(y) == 0:
+        if y.size == 0:
             return []
 
         y_harmonic = self._separate_harmonic(y)

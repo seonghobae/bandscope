@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from bandscope_analysis.chords.chord_recognizer import (
     ChordRecognizer,
@@ -18,6 +19,14 @@ def test_chord_recognizer_empty_audio() -> None:
     recognizer = ChordRecognizer()
     result = recognizer.recognize(np.array([]), sr=22050)
     assert result == []
+
+
+@pytest.mark.parametrize("shape", [(0, 2), (2, 0)])
+def test_chord_recognizer_empty_layouts(shape: tuple[int, int]) -> None:
+    """Every zero-element NumPy layout must short-circuit recognition."""
+    recognizer = ChordRecognizer()
+
+    assert recognizer.recognize(np.empty(shape), sr=22050) == []
 
 
 def test_chord_recognizer_unvoiced_audio() -> None:

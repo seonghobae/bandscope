@@ -35,8 +35,14 @@ const BROWSER_PROGRESS_STEPS = [
   { progressLabel: "Saving reusable features", progressStage: "persist", progressPercent: 90 }
 ] as const;
 const UNSUPPORTED_LOCAL_AUDIO_MESSAGE = "Choose a WAV, MP3, FLAC, or M4A file to start analysis.";
+const LOCAL_AUDIO_TOO_LARGE_MESSAGE = "Choose a shorter or smaller song file to start analysis.";
+const LOCAL_AUDIO_POLICY_MESSAGE =
+  "Selected audio file metadata violates the analysis resource policy.";
+const MAX_LOCAL_AUDIO_FILE_BYTES = 100 * 1024 * 1024;
 const SAFE_LOCAL_AUDIO_MESSAGES = new Set([
   UNSUPPORTED_LOCAL_AUDIO_MESSAGE,
+  LOCAL_AUDIO_TOO_LARGE_MESSAGE,
+  LOCAL_AUDIO_POLICY_MESSAGE,
   "Could not read the selected audio file.",
   "Could not prepare the local project workspace.",
   "Could not prepare the local cache workspace.",
@@ -45,7 +51,7 @@ const SAFE_LOCAL_AUDIO_MESSAGES = new Set([
 const YOUTUBE_VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
 const MAX_YOUTUBE_URL_LENGTH = 2000;
 
-export { MAX_YOUTUBE_URL_LENGTH };
+export { MAX_LOCAL_AUDIO_FILE_BYTES, MAX_YOUTUBE_URL_LENGTH };
 
 /** Documented. */
 export type LocalAudioSelectionResult =
@@ -217,6 +223,26 @@ async function invokeAnalysis(command: string, args?: Record<string, unknown>): 
   return browserFallback(command, args);
 }
 
+/**
+ * Parse a native/import bootstrap and enforce policy-v1 encoded-byte parity
+ * before the selection is allowed to become desktop project state.
+ *
+ * Python service and descriptor checks remain authoritative for analysis; this
+ * bridge check is defense in depth so local-file and imported-file intake fail
+ * at the same 100 MiB boundary instead of waiting for a later analysis stage.
+ */
+function parseBoundedAudioBootstrap(response: unknown): ProjectBootstrapSummary {
+  const bootstrap = parseProjectBootstrapSummary(response);
+  const fileSizeBytes = bootstrap.source.fileSizeBytes;
+  if (!Number.isSafeInteger(fileSizeBytes)) {
+    throw new Error(LOCAL_AUDIO_POLICY_MESSAGE);
+  }
+  if (fileSizeBytes > MAX_LOCAL_AUDIO_FILE_BYTES) {
+    throw new Error(LOCAL_AUDIO_TOO_LARGE_MESSAGE);
+  }
+  return bootstrap;
+}
+
 /** Documented. */
 export function createDefaultAnalysisRequest(): AnalysisJobRequest {
   return createDemoAnalysisJobRequest();
@@ -228,7 +254,7 @@ export async function selectLocalAudioSource(): Promise<LocalAudioSelectionResul
     const response = await invokeAnalysis("select_local_audio_source");
     return {
       ok: true,
-      bootstrap: parseProjectBootstrapSummary(response)
+      bootstrap: parseBoundedAudioBootstrap(response)
     };
   } catch (error) {
     return {
@@ -328,7 +354,7 @@ export async function importYoutubeUrl(url: string): Promise<LocalAudioSelection
     const response = await invokeAnalysis("import_youtube_url", { url });
     return {
       ok: true,
-      bootstrap: parseProjectBootstrapSummary(response)
+      bootstrap: parseBoundedAudioBootstrap(response)
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : (typeof error === "string" ? error : "YouTube import failed.");
