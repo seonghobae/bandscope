@@ -26,7 +26,7 @@ Quickcheck aggregates lint/type/test/build and repository policy checks intended
 ## Python analysis engine notes
 
 - Dependency sync: `uv sync --project services/analysis-engine --group dev`
-- Tests: `uv run --project services/analysis-engine pytest --cov=src/bandscope_analysis --cov-report=term-missing --cov-fail-under=100`
+- Tests: `(cd services/analysis-engine && uv run --project . --group dev pytest --cov=src/bandscope_analysis --cov-report=term-missing --cov-fail-under=100)`
 
 ## CI parity expectation
 

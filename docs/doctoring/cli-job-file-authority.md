@@ -33,6 +33,25 @@ Python documents `os.fstat()` as descriptor-based status inspection, `os.lstat()
 
 ## TDD evidence contract
 
+The current reconciliation also removes a stale CLI test seam left behind when
+temporal analysis moved into the orchestration API. RED commit
+`6591d34d63ad9c8344c6a43aeb4eb564d9ab96fd` requires the organization-owned
+job-input boundary to use semantic identifiers and rejects the no-op
+`cli.TemporalAnalyzer` hook. Production and regression callers then move
+together: file-authority variables name the job path, path authority,
+preflight/opened status, open flags, and descriptor explicitly, while CLI tests
+observe delegation through `run_analysis_job`. The released JSON request and
+response fields remain unchanged at the adapter boundary.
+
+The first full-suite command was invoked from the repository root with the
+project-relative coverage target `src/bandscope_analysis`; all 764 runnable
+tests passed, but coverage correctly failed with `module-not-imported` and
+`no-data-collected`. The repaired operator command changes into
+`services/analysis-engine` before invoking pytest. That exact command produced
+764 passes, 24 explicit native-parity skips, and 100% statement and branch
+coverage. `AGENTS.md`, `CLAUDE.md`, and the harness engineering guide now encode
+the working-directory invariant so the diagnostic failure is not repeated.
+
 The original regression test landed before the namespace repair. It supplies ordinary UNC, forward-slash UNC, extended UNC, and named-pipe device paths while replacing `os.lstat()` with a sentinel that fails if any filesystem lookup is attempted. Exact-head release preflight on that RED commit failed in harness verification, establishing that the previous implementation reached the filesystem lookup. The production repair then moved namespace rejection ahead of `os.lstat()`.
 
 A second regression-first cycle covers the `lstat()`-to-`open()` availability race. The test captures the exact descriptor flags used by `_read_bounded_job_file()` while preserving normal regular-file I/O and requires `O_NONBLOCK` whenever the host exposes it. The test-only predecessor head failed on that assertion, proving that close-on-exec/no-follow alone did not prevent a substituted FIFO/device from turning descriptor acquisition into a wait. The production repair adds only the nonblocking descriptor flag; `fstat()` regular-file and identity checks remain unchanged.

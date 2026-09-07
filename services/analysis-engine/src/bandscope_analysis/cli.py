@@ -11,7 +11,6 @@ import sys
 from datetime import UTC, datetime
 
 from bandscope_analysis.api import get_analysis_status, run_analysis_job, run_analysis_job_updates
-from bandscope_analysis.temporal import TemporalAnalyzer as _TemporalAnalyzer
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -52,11 +51,6 @@ WINDOWS_JOB_PATH_DRIVE_RELATIVE = "drive-relative"
 WINDOWS_JOB_PATH_UNC_OR_DEVICE_NAMESPACE = "unc-or-device-namespace"
 WINDOWS_JOB_PATH_ALTERNATE_STREAM = "alternate-stream"
 
-# Compatibility hook for existing CLI-level tests and downstream monkeypatches.
-# The CLI intentionally does not invoke temporal analysis before request validation;
-# validated orchestration owns every local-audio file access.
-TemporalAnalyzer = _TemporalAnalyzer
-
 
 def failed_cli_response(message: str) -> dict[str, object]:
     """Return a typed CLI failure envelope for malformed stdin payloads."""
@@ -84,70 +78,83 @@ def _read_bounded_stdin() -> tuple[str | None, int]:
     """
     binary_stdin = getattr(sys.stdin, "buffer", None)
     if binary_stdin is None:
-        raw_text = sys.stdin.read(MAX_JSON_FILE_SIZE + 1)
+        input_text = sys.stdin.read(MAX_JSON_FILE_SIZE + 1)
         try:
-            raw_bytes = raw_text.encode("utf-8")
+            input_bytes = input_text.encode("utf-8")
         except UnicodeEncodeError:
             json.dump(failed_cli_response("Job input must be valid UTF-8"), sys.stdout)
             return None, 1
     else:
-        raw_bytes = binary_stdin.read(MAX_JSON_FILE_SIZE + 1)
-    if len(raw_bytes) > MAX_JSON_FILE_SIZE:
-        path = "stdin"
-        logger.warning("Security: rejected input exceeding maximum size limit: %s", path)
+        input_bytes = binary_stdin.read(MAX_JSON_FILE_SIZE + 1)
+    if len(input_bytes) > MAX_JSON_FILE_SIZE:
+        input_source_label = "stdin"
+        logger.warning(
+            "Security: rejected input exceeding maximum size limit: %s",
+            input_source_label,
+        )
         json.dump(failed_cli_response("Job input exceeds maximum size limit"), sys.stdout)
         return None, 1
     try:
-        raw_text = raw_bytes.decode("utf-8")
+        input_text = input_bytes.decode("utf-8")
     except UnicodeDecodeError:
         json.dump(failed_cli_response("Job input must be valid UTF-8"), sys.stdout)
         return None, 1
-    return raw_text.strip(), 0
+    return input_text.strip(), 0
 
 
-def _normalized_win32_device_token(component: str) -> str:
+def _normalized_win32_device_token(path_component: str) -> str:
     """Return the Win32 device token after documented space/period normalization."""
-    normalized_component = component.lstrip(" ").rstrip(" .")
+    normalized_component = path_component.lstrip(" ").rstrip(" .")
     return normalized_component.split(".", 1)[0].rstrip(" ").split(":", 1)[0].upper()
 
 
-def _path_device_tokens(path: str) -> list[str]:
+def _path_device_tokens(job_path: str) -> list[str]:
     """Return normalized device tokens for every path component."""
-    components = path.replace("\\", "/").split("/")
-    return [_normalized_win32_device_token(component) for component in components]
+    path_components = job_path.replace("\\", "/").split("/")
+    return [_normalized_win32_device_token(path_component) for path_component in path_components]
 
 
-def _uses_windows_reserved_filename(path: str) -> bool:
+def _uses_windows_reserved_filename(job_path: str) -> bool:
     """Return whether any component is a naming-a-file reserved filename."""
-    return any(token in _WINDOWS_RESERVED_FILENAMES for token in _path_device_tokens(path))
-
-
-def _uses_windows_console_handle(path: str) -> bool:
-    """Return whether any component is a CONIN$/CONOUT$ console handle."""
-    return any(token in _WINDOWS_CONSOLE_HANDLES for token in _path_device_tokens(path))
-
-
-def _uses_windows_legacy_device_alias(path: str) -> bool:
-    """Return whether any component is a fail-closed legacy device such as CLOCK$."""
-    return any(token in _WINDOWS_LEGACY_DEVICE_ALIASES for token in _path_device_tokens(path))
-
-
-def _uses_windows_device_alias(path: str) -> bool:
-    """Return whether any component normalizes to a reserved, console, or legacy device."""
-    return (
-        _uses_windows_reserved_filename(path)
-        or _uses_windows_console_handle(path)
-        or _uses_windows_legacy_device_alias(path)
+    return any(
+        device_token in _WINDOWS_RESERVED_FILENAMES
+        for device_token in _path_device_tokens(job_path)
     )
 
 
-def _uses_windows_alternate_stream(path: str) -> bool:
+def _uses_windows_console_handle(job_path: str) -> bool:
+    """Return whether any component is a CONIN$/CONOUT$ console handle."""
+    return any(
+        device_token in _WINDOWS_CONSOLE_HANDLES for device_token in _path_device_tokens(job_path)
+    )
+
+
+def _uses_windows_legacy_device_alias(job_path: str) -> bool:
+    """Return whether any component is a fail-closed legacy device such as CLOCK$."""
+    return any(
+        device_token in _WINDOWS_LEGACY_DEVICE_ALIASES
+        for device_token in _path_device_tokens(job_path)
+    )
+
+
+def _uses_windows_device_alias(job_path: str) -> bool:
+    """Return whether any component normalizes to a reserved, console, or legacy device."""
+    return (
+        _uses_windows_reserved_filename(job_path)
+        or _uses_windows_console_handle(job_path)
+        or _uses_windows_legacy_device_alias(job_path)
+    )
+
+
+def _uses_windows_alternate_stream(job_path: str) -> bool:
     """Return whether a post-drive path component carries NTFS stream syntax."""
-    _drive, drive_tail = ntpath.splitdrive(path)
-    return any(":" in component for component in drive_tail.replace("\\", "/").split("/"))
+    _path_drive, drive_path_tail = ntpath.splitdrive(job_path)
+    return any(
+        ":" in path_component for path_component in drive_path_tail.replace("\\", "/").split("/")
+    )
 
 
-def classify_windows_job_path_authority(path: str) -> str | None:
+def classify_windows_job_path_authority(job_path: str) -> str | None:
     """Return the lexical job-path rejection class, or ``None`` if lookup may proceed.
 
     Classification is purely lexical and must not call ``os.lstat`` or ``os.open``.
@@ -156,23 +163,23 @@ def classify_windows_job_path_authority(path: str) -> str | None:
     and the legacy ``CLOCK$`` device follow the same order so a Win32 device
     suffix cannot be mislabeled as a named stream.
     """
-    drive, drive_tail = ntpath.splitdrive(path)
-    if path.replace("/", "\\").startswith("\\\\"):
+    path_drive, drive_path_tail = ntpath.splitdrive(job_path)
+    if job_path.replace("/", "\\").startswith("\\\\"):
         return WINDOWS_JOB_PATH_UNC_OR_DEVICE_NAMESPACE
-    if drive and not drive_tail.startswith(("\\", "/")):
+    if path_drive and not drive_path_tail.startswith(("\\", "/")):
         return WINDOWS_JOB_PATH_DRIVE_RELATIVE
-    if _uses_windows_console_handle(path):
+    if _uses_windows_console_handle(job_path):
         return WINDOWS_JOB_PATH_CONSOLE_HANDLE
-    if _uses_windows_legacy_device_alias(path):
+    if _uses_windows_legacy_device_alias(job_path):
         return WINDOWS_JOB_PATH_LEGACY_DEVICE
-    if _uses_windows_reserved_filename(path):
+    if _uses_windows_reserved_filename(job_path):
         return WINDOWS_JOB_PATH_RESERVED_FILENAME
-    if _uses_windows_alternate_stream(path):
+    if _uses_windows_alternate_stream(job_path):
         return WINDOWS_JOB_PATH_ALTERNATE_STREAM
     return None
 
 
-def _read_bounded_job_file(path: str) -> bytes:
+def _read_bounded_job_file(job_file_path: str) -> bytes:
     """Read a bounded regular local job file through a verified descriptor.
 
     UNC/network shapes, device namespaces, drive-relative Win32 paths, NTFS
@@ -195,52 +202,65 @@ def _read_bounded_job_file(path: str) -> bytes:
     requested where the platform exposes them. The byte bound is enforced on the
     descriptor-backed stream rather than on a second path lookup.
     """
-    authority = classify_windows_job_path_authority(path)
-    if authority is not None:
-        path = f"class={authority}"
-        logger.warning("Security: rejected job path authority: %s", path)
+    path_authority = classify_windows_job_path_authority(job_file_path)
+    if path_authority is not None:
+        rejection_context = f"class={path_authority}"
+        logger.warning("Security: rejected job path authority: %s", rejection_context)
         raise OSError("job path must use the local regular-file namespace")
 
-    before = os.lstat(path)
-    if not stat.S_ISREG(before.st_mode):
-        path = "non-regular"
-        logger.warning("Security: rejected non-regular job file: %s", path)
+    preflight_status = os.lstat(job_file_path)
+    if not stat.S_ISREG(preflight_status.st_mode):
+        rejection_context = "non-regular"
+        logger.warning("Security: rejected non-regular job file: %s", rejection_context)
         raise OSError("job path is not a regular file")
 
-    flags = os.O_RDONLY
-    flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    flags |= getattr(os, "O_NONBLOCK", 0)
-    flags |= getattr(os, "O_BINARY", 0)
-    descriptor = os.open(path, flags)
+    open_flags = os.O_RDONLY
+    open_flags |= getattr(os, "O_CLOEXEC", 0)
+    open_flags |= getattr(os, "O_NOFOLLOW", 0)
+    open_flags |= getattr(os, "O_NONBLOCK", 0)
+    open_flags |= getattr(os, "O_BINARY", 0)
+    file_descriptor = os.open(job_file_path, open_flags)
     try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            path = "non-regular"
-            logger.warning("Security: descriptor yielded non-regular file: %s", path)
+        opened_status = os.fstat(file_descriptor)
+        if not stat.S_ISREG(opened_status.st_mode):
+            rejection_context = "non-regular"
+            logger.warning(
+                "Security: descriptor yielded non-regular file: %s",
+                rejection_context,
+            )
             raise OSError("opened job path is not a regular file")
-        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
-            path = "toctou"
-            logger.warning("Security: detected potential TOCTOU on job path: %s", path)
+        if (preflight_status.st_dev, preflight_status.st_ino) != (
+            opened_status.st_dev,
+            opened_status.st_ino,
+        ):
+            rejection_context = "toctou"
+            logger.warning(
+                "Security: detected potential TOCTOU on job path: %s",
+                rejection_context,
+            )
             raise OSError("job path changed before open")
-        with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            return stream.read(MAX_JSON_FILE_SIZE + 1)
+        with os.fdopen(file_descriptor, "rb", closefd=False) as job_file_stream:
+            return job_file_stream.read(MAX_JSON_FILE_SIZE + 1)
     finally:
-        os.close(descriptor)
+        os.close(file_descriptor)
 
 
 def main() -> int:
     """Read one explicit argument or bounded stdin job and print its response."""
     progress_jsonl = "--progress-jsonl" in sys.argv[1:]
-    cli_args = [arg for arg in sys.argv[1:] if arg != "--progress-jsonl"]
-    input_data: str | None = None
+    command_arguments = [
+        command_argument
+        for command_argument in sys.argv[1:]
+        if command_argument != "--progress-jsonl"
+    ]
+    job_input_data: str | None = None
 
     # Explicit argument modes own their input source. Resolve them before touching
     # stdin so ``--status`` and ``--job`` cannot block on an unrelated open pipe or
     # consume data that the caller did not select as the job payload.
-    if cli_args:
-        if cli_args[0] == "--status":
-            if len(cli_args) != 1:
+    if command_arguments:
+        if command_arguments[0] == "--status":
+            if len(command_arguments) != 1:
                 json.dump(
                     failed_cli_response("--status does not accept additional arguments"),
                     sys.stdout,
@@ -248,39 +268,45 @@ def main() -> int:
                 return 1
             json.dump(get_analysis_status(), sys.stdout)
             return 0
-        if cli_args[0] == "--job":
-            if len(cli_args) != 2:
+        if command_arguments[0] == "--job":
+            if len(command_arguments) != 2:
                 json.dump(
                     failed_cli_response("--job requires exactly one JSON payload or file path"),
                     sys.stdout,
                 )
                 return 1
-            input_data = cli_args[1]
-            if input_data.lstrip(" \t\r\n").startswith("{"):
+            job_input_data = command_arguments[1]
+            if job_input_data.lstrip(" \t\r\n").startswith("{"):
                 try:
-                    input_bytes = input_data.encode("utf-8")
+                    job_input_bytes = job_input_data.encode("utf-8")
                 except UnicodeEncodeError:
                     json.dump(failed_cli_response("Job input must be valid UTF-8"), sys.stdout)
                     return 1
-                if len(input_bytes) > MAX_JSON_FILE_SIZE:
-                    path = "cli_arg"
-                    logger.warning("Security: rejected oversized input: %s", path)
+                if len(job_input_bytes) > MAX_JSON_FILE_SIZE:
+                    rejection_context = "cli_arg"
+                    logger.warning(
+                        "Security: rejected oversized input: %s",
+                        rejection_context,
+                    )
                     json.dump(
                         failed_cli_response("Job input exceeds maximum size limit"), sys.stdout
                     )
                     return 1
             else:
                 try:
-                    input_bytes = _read_bounded_job_file(input_data)
-                    if len(input_bytes) > MAX_JSON_FILE_SIZE:
-                        path = "oversized-job-file"
-                        logger.warning("Security: rejected oversized file: %s", path)
+                    job_input_bytes = _read_bounded_job_file(job_input_data)
+                    if len(job_input_bytes) > MAX_JSON_FILE_SIZE:
+                        rejection_context = "oversized-job-file"
+                        logger.warning(
+                            "Security: rejected oversized file: %s",
+                            rejection_context,
+                        )
                         json.dump(
                             failed_cli_response("Job file exceeds maximum size limit"),
                             sys.stdout,
                         )
                         return 1
-                    input_data = input_bytes.decode("utf-8")
+                    job_input_data = job_input_bytes.decode("utf-8")
                 except UnicodeDecodeError:
                     json.dump(failed_cli_response("Job input must be valid UTF-8"), sys.stdout)
                     return 1
@@ -291,45 +317,52 @@ def main() -> int:
             json.dump(failed_cli_response("Unsupported CLI arguments"), sys.stdout)
             return 1
 
-    if input_data is None:
-        input_data, stdin_exit_code = _read_bounded_stdin()
-        if input_data is None:
+    if job_input_data is None:
+        job_input_data, stdin_exit_code = _read_bounded_stdin()
+        if job_input_data is None:
             return stdin_exit_code
 
-    if not input_data:
+    if not job_input_data:
         json.dump(failed_cli_response("Empty input"), sys.stdout)
         return 0
 
     try:
-        payload = json.loads(input_data)
-    except json.JSONDecodeError as error:
-        json.dump(failed_cli_response(f"Invalid analysis job request: {error.msg}"), sys.stdout)
+        job_request_payload = json.loads(job_input_data)
+    except json.JSONDecodeError as decoding_error:
+        json.dump(
+            failed_cli_response(f"Invalid analysis job request: {decoding_error.msg}"),
+            sys.stdout,
+        )
         return 0
 
-    if not isinstance(payload, dict):
+    if not isinstance(job_request_payload, dict):
         json.dump(
             failed_cli_response("Invalid analysis job request: invalid field 'root'"), sys.stdout
         )
         return 0
 
-    job_id = payload.get("jobId")
+    job_id = job_request_payload.get("jobId")
     if not isinstance(job_id, str) or not job_id.strip():
         json.dump(
             failed_cli_response("Invalid analysis job request: invalid field 'jobId'"), sys.stdout
         )
         return 0
 
-    request = payload.get("request")
+    analysis_request = job_request_payload.get("request")
     requested_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     if progress_jsonl:
-        for update in run_analysis_job_updates(job_id, request, requested_at):
-            json.dump(update, sys.stdout)
+        for job_status_update in run_analysis_job_updates(
+            job_id,
+            analysis_request,
+            requested_at,
+        ):
+            json.dump(job_status_update, sys.stdout)
             sys.stdout.write("\n")
             sys.stdout.flush()
         return 0
 
-    response = run_analysis_job(job_id, request, requested_at)
-    json.dump(response, sys.stdout)
+    job_response = run_analysis_job(job_id, analysis_request, requested_at)
+    json.dump(job_response, sys.stdout)
     return 0
 
 

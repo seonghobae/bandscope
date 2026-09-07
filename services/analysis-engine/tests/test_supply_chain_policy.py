@@ -1275,9 +1275,7 @@ def test_workflow_concurrency_cancels_only_superseded_pr_heads() -> None:
         workflow = (workflows_dir / workflow_name).read_text(encoding="utf-8")
         assert "concurrency:" in workflow, workflow_name
         assert "cancel-in-progress: false" in workflow, workflow_name
-        assert "contents: read" in workflow or "permissions: read-all" in workflow, (
-            workflow_name
-        )
+        assert "contents: read" in workflow or "permissions: read-all" in workflow, workflow_name
 
     assert "pull_request:" not in (workflows_dir / "release.yml").read_text(encoding="utf-8")
 
