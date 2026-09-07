@@ -1,14 +1,15 @@
-name: security-audit
+name: security-backstop
 
 on:
-  pull_request:
-    branches:
-      - develop
-      - main
   push:
     branches:
       - develop
       - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.repository }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -19,9 +20,12 @@ env:
   GIT_CONFIG_VALUE_0: develop
 
 jobs:
-  audit:
-    name: security-audit
+  security-backstop:
+    name: security-backstop
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -49,6 +53,9 @@ jobs:
         run: uv sync --project services/analysis-engine --group dev --frozen
       - name: Audit Python dependencies
         run: uv run --project services/analysis-engine --with pip-audit==2.8.0 pip-audit --local --strict
+      - name: Run Bandit
+        working-directory: services/analysis-engine
+        run: uv run bandit -c pyproject.toml -r src
       - name: Install stable Rust toolchain
         run: rustup toolchain install stable --profile minimal
       - name: Install cargo-audit
@@ -56,3 +63,35 @@ jobs:
       - name: Audit Rust dependencies
         working-directory: apps/desktop/src-tauri
         run: cargo +stable audit
+      - name: Scan for common hardcoded secrets
+        run: |
+          ! git grep -nE '(g[h]p_|g[h]o_|A[K]IA[0-9A-Z]{16}|A[I]za[0-9A-Za-z\-_]{35}|BEGIN (R[S]A|E[C]|OPENS[S]H|P[G]P) PRIVATE KEY)' -- . ':(exclude)package-lock.json' ':(exclude)node_modules/**'
+      - name: Run Trivy filesystem scan summary
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          version: v0.71.2
+          format: table
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "0"
+          skip-dirs: services/analysis-engine/.venv
+          trivyignores: ./.trivyignore
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          version: v0.71.2
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          skip-dirs: services/analysis-engine/.venv
+          trivyignores: ./.trivyignore
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          sarif_file: trivy-results.sarif

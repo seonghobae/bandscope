@@ -38,12 +38,10 @@ The expected sequence is:
 Bootstrap or setup work is not complete unless GitHub-facing supply-chain controls are both committed and, where permissions allow, enforced:
 
 - `.github/dependabot.yml`
-- `.github/workflows/dependency-review.yml`
 - `.github/workflows/security-audit.yml`
-- `.github/workflows/codeql.yml`
 - `.github/workflows/sbom.yml`
 - `.github/workflows/release.yml`
-- branch protection or rulesets for `main` and `develop` that require `ci / build-and-test`, `dependency-review`, `security-audit`, `CodeQL`, `sbom`, `release-preflight`, `gate / build / windows`, and `gate / build / macos`
+- branch protection or rulesets for `main` and `develop` that require repository CI, SBOM, platform builds, and the organization-required Security Scan, CodeQL/code-quality, SAST, Strix, and review workflows
 - PR workflow that still requests CodeRabbit review and records its result when the provider responds cleanly
 - release retention for the generated SBOM and supplemental inventory
 
