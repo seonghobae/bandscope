@@ -11,6 +11,7 @@
 ### Fixed
 
 - Enforce one canonical local-audio resource policy across native local-file/YouTube bootstrap intake, the desktop bridge, Python request preflight, temporal decoding, and stem separation so oversized, overlong, malformed, wrong-rate, or non-finite input fails before bootstrap storage or expensive analysis/model work.
+- Commit an admitted local source through a platform-specific no-clobber durability barrier before returning path-free project authority: Unix synchronizes the project directory after hard-link publication/stage removal, while Windows uses no-replace `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`.
 - Preflight source-container duration, sample rate, and channel count from the already-open audio handle before temporal, stem, or bass-transcription decoders resample, downmix, or truncate it; successful metadata probes rewind the handle and malformed probes fail closed.
 - Bound the admitted canonical decoded mono buffer to 317,520,000 bytes as well as the existing 39,690,000-sample ceiling, so decoder dtype expansion cannot stay within the sample count while exceeding the explicit in-memory audio budget.
 - Fail closed on malformed known YouTube duration metadata before `download=True`; Boolean, non-numeric, non-finite, zero, negative, and non-canonical numeric-subtype duration evidence can no longer authorize a media download through Python numeric coercion or subclass semantics.
