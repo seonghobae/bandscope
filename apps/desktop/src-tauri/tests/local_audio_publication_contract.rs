@@ -51,6 +51,36 @@ fn local_audio_publication_must_not_overwrite_an_existing_source_name() {
 }
 
 #[test]
+fn local_audio_materializer_commit_failure_must_preserve_existing_publication() {
+    let source = include_str!("../src/main.rs");
+    let materializer_start = source
+        .find("fn materialize_local_audio_source(")
+        .expect("desktop materializer must remain present");
+    let materializer_tail = &source[materializer_start..];
+    let materializer_end = materializer_tail
+        .find("\n}\n\nfn parse_request_payload")
+        .expect("materializer boundary must remain inspectable");
+    let materializer = &materializer_tail[..materializer_end];
+    let commit_failure_start = materializer
+        .find("if commit_local_audio_publication(&stage, &destination, project_root).is_err()")
+        .expect("materializer must handle publication-commit failure explicitly");
+    let commit_failure_tail = &materializer[commit_failure_start..];
+    let commit_failure_end = commit_failure_tail
+        .find("\n    }\n\n    let published_path_metadata")
+        .expect("publication failure boundary must remain inspectable");
+    let commit_failure = &commit_failure_tail[..commit_failure_end];
+
+    assert!(
+        commit_failure.contains("std::fs::remove_file(&stage)"),
+        "failed publication may clean up only the private stage it owns"
+    );
+    assert!(
+        !commit_failure.contains("std::fs::remove_file(&destination)"),
+        "a no-clobber collision means destination may pre-exist; the materializer must never delete it on commit failure"
+    );
+}
+
+#[test]
 fn local_audio_publication_commits_namespace_before_identity_authority() {
     let source = include_str!("../src/main.rs");
     let materializer_start = source
