@@ -106,7 +106,7 @@ fn commit_local_audio_publication_platform(
 #[cfg(test)]
 mod tests {
     use super::commit_local_audio_publication;
-    use std::{fs, path::PathBuf};
+    use std::{fs, io, path::PathBuf};
 
     fn test_root() -> PathBuf {
         std::env::temp_dir().join(format!(
