@@ -120,7 +120,7 @@ def test_root_manifest_pins_the_lockfile_generator_and_fails_on_drift() -> None:
     manifest = _root_manifest()
 
     assert manifest["packageManager"] == f"npm@{_EXPECTED_NPM_VERSION}"
-    assert manifest["engines"] == {"node": ">=22.13 <23"}
+    assert manifest["engines"] == {"node": ">=22.22.2 <23"}
     assert manifest["devEngines"] == {
         "packageManager": {
             "name": "npm",

@@ -1,0 +1,72 @@
+name: node-minimum-compatibility
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+      - main
+
+permissions:
+  contents: read
+
+env:
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: develop
+  EXPECTED_NPM_VERSION: "10.9.9"
+
+jobs:
+  node-minimum-compatibility:
+    name: gate / build / node-minimum-compatibility
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.22.2
+          package-manager-cache: false
+      - name: Activate pinned npm runtime
+        run: corepack enable npm
+      - name: Verify exact npm lockfile generator and bundled tar
+        run: |
+          test "$(npm --version)" = "$EXPECTED_NPM_VERSION"
+          npm run check:npm-runtime
+      - name: Install frozen Node dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.8.6"
+          enable-cache: false
+      - name: Install stable Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Sync frozen Python dependencies
+        run: uv sync --project services/analysis-engine --group dev --frozen
+      - name: Build and install Rust numeric extension
+        shell: bash
+        run: |
+          VENV_PY="$PWD/services/analysis-engine/.venv/bin/python"
+          uvx maturin@1.9.6 build --release \
+            --manifest-path services/analysis-engine/rust/Cargo.toml \
+            --interpreter "$VENV_PY" \
+            --out services/analysis-engine/rust/dist
+          uv pip install --python "$VENV_PY" services/analysis-engine/rust/dist/*.whl
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test with measured coverage
+        run: npm run test
+      - name: Build production workspaces
+        run: npm run build
+      - name: Build Storybook
+        run: npm run build-storybook --workspace @bandscope/desktop
+      - name: Check Tauri shell
+        run: cargo +stable check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+      - name: Test Tauri shell
+        run: cargo +stable test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
