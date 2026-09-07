@@ -243,7 +243,9 @@ def test_npm_consuming_workflows_activate_pinned_runtime_before_dependency_reads
             assert len(setup_node_steps) == 1, f"{workflow_name}:{job_name} setup-node ownership"
             setup_options = setup_node_steps[0].get("with")
             assert isinstance(setup_options, dict)
-            assert "cache" not in setup_options, f"{workflow_name}:{job_name} pre-Corepack npm cache"
+            assert "cache" not in setup_options, (
+                f"{workflow_name}:{job_name} pre-Corepack npm cache"
+            )
             assert setup_options.get("package-manager-cache") is False, (
                 f"{workflow_name}:{job_name} must disable setup-node package-manager cache"
             )

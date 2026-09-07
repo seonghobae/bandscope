@@ -11,6 +11,7 @@ EXPECTED_NODE_ENGINE = ">=22.22.2 <23"
 EXPECTED_NODE_FLOOR = (22, 22, 2)
 EXPECTED_NPM_VERSION = "10.9.9"
 EXPECTED_JSDOM_RANGE = "^30.0.1"
+EXPECTED_ESLINT_RANGE = "^10.9.1"
 
 
 def _load_json(path: str) -> dict[str, object]:
@@ -47,8 +48,28 @@ def test_jsdom_30_is_adopted_in_manifest_and_lock() -> None:
     package_lock = _load_json("package-lock.json")
 
     assert desktop["devDependencies"]["jsdom"] == EXPECTED_JSDOM_RANGE
-    assert package_lock["packages"]["apps/desktop"]["devDependencies"]["jsdom"] == EXPECTED_JSDOM_RANGE
+    assert (
+        package_lock["packages"]["apps/desktop"]["devDependencies"]["jsdom"] == EXPECTED_JSDOM_RANGE
+    )
     assert package_lock["packages"]["apps/desktop/node_modules/jsdom"]["version"] == "30.0.1"
+
+
+def test_eslint_10_9_1_intent_is_preserved_in_both_workspaces_and_lock() -> None:
+    """The canonical lock owner must preserve the reviewed ESLint dependency intent."""
+    desktop = _load_json("apps/desktop/package.json")
+    shared_types = _load_json("packages/shared-types/package.json")
+    package_lock = _load_json("package-lock.json")
+
+    assert desktop["devDependencies"]["eslint"] == EXPECTED_ESLINT_RANGE
+    assert shared_types["devDependencies"]["eslint"] == EXPECTED_ESLINT_RANGE
+    assert (
+        package_lock["packages"]["apps/desktop"]["devDependencies"]["eslint"]
+        == EXPECTED_ESLINT_RANGE
+    )
+    assert (
+        package_lock["packages"]["packages/shared-types"]["devDependencies"]["eslint"]
+        == EXPECTED_ESLINT_RANGE
+    )
 
 
 def test_minimum_node_lane_runs_complete_suite_with_pinned_npm() -> None:
@@ -67,7 +88,6 @@ def test_minimum_node_lane_runs_complete_suite_with_pinned_npm() -> None:
     required_fragments = (
         "node-version: 22.22.2",
         "package-manager-cache: false",
-        f'EXPECTED_NPM_VERSION: "{EXPECTED_NPM_VERSION}"',
         "corepack enable npm",
         'test "$(npm --version)" = "$EXPECTED_NPM_VERSION"',
         "npm run check:npm-runtime",
@@ -83,9 +103,12 @@ def test_minimum_node_lane_runs_complete_suite_with_pinned_npm() -> None:
     for fragment in required_fragments:
         assert fragment in body, f"minimum-version job is missing: {fragment}"
 
+    assert f'EXPECTED_NPM_VERSION: "{EXPECTED_NPM_VERSION}"' in workflow
+
     for mutable_command in ("npm install ", "npm update ", "npx "):
         assert mutable_command not in body, (
-            f"minimum-version workflow must not resolve dependencies mutably: {mutable_command.strip()}"
+            "minimum-version workflow must not resolve dependencies mutably: "
+            f"{mutable_command.strip()}"
         )
 
     setup_node = body.split("- uses: actions/setup-node@", maxsplit=1)[1].split(
@@ -108,5 +131,12 @@ def test_repository_no_longer_advertises_node_22_13_floor() -> None:
         "docs/operations/deploy-runbook.md",
     )
 
-    stale = [path for path in audited_paths if "22.13" in (ROOT / path).read_text(encoding="utf-8")]
+    stale = [
+        path
+        for path in audited_paths
+        if path != "package-lock.json" and "22.13" in (ROOT / path).read_text(encoding="utf-8")
+    ]
+    package_lock = _load_json("package-lock.json")
+    if package_lock["packages"][""]["engines"] != {"node": EXPECTED_NODE_ENGINE}:
+        stale.append("package-lock.json#packages[''].engines")
     assert stale == []
