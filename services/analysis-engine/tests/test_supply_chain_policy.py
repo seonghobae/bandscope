@@ -1235,28 +1235,51 @@ def test_supply_chain_check_accepts_repo_ossf_publish_restrictions(
     assert not any("ossf scorecard" in violation for violation in violations)
 
 
-def test_central_governance_workflows_are_push_only_where_local_signals_remain() -> None:
-    """Ensure central PR governance keeps only repo-local push security signals."""
+def test_central_governance_workflows_are_consolidated_push_backstops() -> None:
+    """Ensure central PR governance leaves one local push security backstop."""
     repo_root = Path(__file__).resolve().parents[3]
     workflows_dir = repo_root / ".github" / "workflows"
 
     assert not (workflows_dir / "dependency-review.yml").exists()
 
-    for local_signal in ("codeql.yml", "ossf-scorecard.yml", "trivy.yml"):
-        workflow = workflows_dir / local_signal
-        assert workflow.exists(), (
-            f"{local_signal} keeps repository-local security-tab/SAST signal "
-            "while central required workflows handle PR enforcement"
-        )
-        assert "pull_request:" not in workflow.read_text(encoding="utf-8")
+    security_backstop = workflows_dir / "security-audit.yml"
+    assert security_backstop.exists()
+    workflow = security_backstop.read_text(encoding="utf-8")
+    assert "pull_request:" not in workflow
+    for retired_workflow in ("bandit.yml", "codeql.yml", "secret-scan-gate.yml", "trivy.yml"):
+        assert not (workflows_dir / retired_workflow).exists()
 
     supply_chain = load_module(
         "scripts/checks/verify_supply_chain.py", "verify_supply_chain_central"
     )
     required = {path.as_posix() for path in supply_chain.REQUIRED_FILES}
     assert ".github/workflows/dependency-review.yml" not in required
-    assert ".github/workflows/codeql.yml" in required
+    assert ".github/workflows/codeql.yml" not in required
+    assert ".github/workflows/security-audit.yml" in required
     assert ".github/workflows/ossf-scorecard.yml" in required
+
+
+def test_workflow_concurrency_cancels_only_superseded_pr_heads() -> None:
+    """Cancel same-PR stale heads without cancelling push, release, or schedule work."""
+    repo_root = Path(__file__).resolve().parents[3]
+    workflows_dir = repo_root / ".github" / "workflows"
+
+    for workflow_name in ("build-baseline.yml", "ci.yml", "sbom.yml"):
+        workflow = (workflows_dir / workflow_name).read_text(encoding="utf-8")
+        assert "concurrency:" in workflow, workflow_name
+        assert "github.workflow }}-${{ github.repository }}" in workflow, workflow_name
+        assert "github.event.pull_request.number" in workflow, workflow_name
+        assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
+
+    for workflow_name in ("ossf-scorecard.yml", "release.yml", "security-audit.yml"):
+        workflow = (workflows_dir / workflow_name).read_text(encoding="utf-8")
+        assert "concurrency:" in workflow, workflow_name
+        assert "cancel-in-progress: false" in workflow, workflow_name
+        assert "contents: read" in workflow or "permissions: read-all" in workflow, (
+            workflow_name
+        )
+
+    assert "pull_request:" not in (workflows_dir / "release.yml").read_text(encoding="utf-8")
 
 
 def test_opencode_review_declares_top_level_token_permissions() -> None:

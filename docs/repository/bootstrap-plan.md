@@ -31,12 +31,13 @@ After workflows exist, require these stable checks on `main` and `develop`:
 - `CodeRabbit`
 - `ci / build-and-test`
 - `dependency-review`
-- `security-audit`
-- `CodeQL`
 - `sbom`
-- `release-preflight`
 - `gate / build / windows`
 - `gate / build / macos`
+- `trivy-fs`
+- `Analyze (javascript-typescript)`
+- `Analyze (python)`
+- organization-required Security Scan, CodeQL/code-quality, SAST Semgrep, Strix, Noema, OpenCode, scheduler, and empty-PR workflows
 
 ## Initial README exception
 
